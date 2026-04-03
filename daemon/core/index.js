@@ -563,12 +563,21 @@ export async function createBridge(options = {}) {
   /**
    * Post the final response.
    */
-  async function postFinalResponse(streamCb, result, replyChannel, userId) {
+  async function postFinalResponse(streamCb, result, replyChannel, userId, originMessage) {
     if (!streamCb.wasAlreadyPosted(result)) {
       await postClaudeResponse(replyChannel, userId, result);
     } else {
-      await replyChannel.send(i18n.t('stream.tagOnly', { userId: userId || '' }));
       logger.log('info', 'stream:tagOnly', { threadId: replyChannel.id });
+    }
+
+    // Always reply to the original message to trigger Discord notification
+    if (originMessage) {
+      try {
+        await originMessage.reply(i18n.t('done', { userId: userId || '' }));
+      } catch {
+        // Fallback: mention in channel if reply fails (e.g. original message deleted)
+        await replyChannel.send(i18n.t('done', { userId: userId || '' }));
+      }
     }
   }
 
@@ -726,7 +735,7 @@ export async function createBridge(options = {}) {
       });
 
       await reactions.removeTyping(message);
-      await postFinalResponse(streamCb, finalResult, replyChannel, message.author.id);
+      await postFinalResponse(streamCb, finalResult, replyChannel, message.author.id, message);
       await handleOutputFiles(outputDir, replyChannel);
       await reactions.addDone(message);
     } catch (err) {
@@ -772,7 +781,7 @@ export async function createBridge(options = {}) {
 
       if (sessionId) threads.setSessionId(threadId, sessionId);
 
-      await postFinalResponse(streamCb, result, channel, userId);
+      await postFinalResponse(streamCb, result, channel, userId, null);
     } catch (err) {
       logger.log('error', 'resume:error', { threadId, error: err.message, stack: err.stack });
       await channel.send(i18n.t('error', { message: 'Internal error. Check server logs.' }));
