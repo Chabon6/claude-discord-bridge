@@ -40,7 +40,7 @@
     "notInAllowlist": "You are not authorized to use this bot via DM."
   },
   "permission": {
-    "prompt": "<@{userId}> Some operations were denied due to insufficient permissions during execution. Would you like to retry the denied operations with full permissions?\n\nReply **yes** to approve (retry with full-auto mode)\nReply **no** to cancel\n\n(Auto-cancels in 60 seconds)",
+    "prompt": "<@{userId}> Some operations were denied due to insufficient permissions during execution. Would you like to retry the denied operations with full permissions?\n\nClick a button below to approve or cancel (valid for 5 minutes)",
     "approved": "Approved. Retrying with full permissions...",
     "rejected": "Cancelled. No retry.",
     "timeout": "No response within 60 seconds. Auto-cancelled.",

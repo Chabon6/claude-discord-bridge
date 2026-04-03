@@ -25,6 +25,10 @@ import {
   REST,
   Routes,
   SlashCommandBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType,
 } from 'discord.js';
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -582,35 +586,60 @@ export async function createBridge(options = {}) {
   }
 
   /**
-   * Prompt the user for permission approval via Discord message.
-   * Waits 60 seconds for a yes/no reply.
+   * Prompt the user for permission approval via Discord buttons.
+   * Waits 5 minutes for a button click. Only the original user can interact.
    *
    * @param {object} channel - Discord channel to send the prompt
-   * @param {string} userId  - Discord user ID to listen for
+   * @param {string} userId  - Discord user ID allowed to click
    * @returns {Promise<boolean>} true if user approved
    */
   async function promptPermissionRetry(channel, userId) {
-    await channel.send(i18n.t('permission.prompt', { userId }));
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId('permission_approve')
+        .setLabel('Approve')
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId('permission_reject')
+        .setLabel('Reject')
+        .setStyle(ButtonStyle.Danger),
+    );
+
+    const promptMsg = await channel.send({
+      content: i18n.t('permission.prompt', { userId }),
+      components: [row],
+    });
 
     try {
-      const collected = await channel.awaitMessages({
-        filter: (m) =>
-          m.author.id === userId &&
-          /^(yes|no|y|n)$/i.test(m.content.trim()),
-        max: 1,
-        time: 60_000,
-        errors: ['time'],
+      const interaction = await promptMsg.awaitMessageComponent({
+        componentType: ComponentType.Button,
+        filter: (i) => i.user.id === userId,
+        time: 300_000, // 5 minutes
       });
 
-      const reply = collected.first()?.content?.trim()?.toLowerCase();
-      if (reply === 'yes' || reply === 'y') {
-        await channel.send(i18n.t('permission.approved'));
+      // Disable buttons after click
+      row.components.forEach((btn) => btn.setDisabled(true));
+
+      if (interaction.customId === 'permission_approve') {
+        await interaction.update({
+          content: i18n.t('permission.approved'),
+          components: [row],
+        });
         return true;
       }
-      await channel.send(i18n.t('permission.rejected'));
+
+      await interaction.update({
+        content: i18n.t('permission.rejected'),
+        components: [row],
+      });
       return false;
     } catch {
-      await channel.send(i18n.t('permission.timeout'));
+      // Timeout — disable buttons and notify
+      row.components.forEach((btn) => btn.setDisabled(true));
+      await promptMsg.edit({
+        content: i18n.t('permission.timeout'),
+        components: [row],
+      }).catch(() => {});
       return false;
     }
   }
