@@ -1,0 +1,42 @@
+{
+  "startup": {
+    "success": "Discord Bridge started successfully",
+    "time": "Time: {timestamp}",
+    "bot": "Bot: <@{botUserId}>",
+    "channel": "Channel: <#{channelId}>",
+    "mentionGating": "Mention gating: {status}",
+    "dmPolicy": "DM policy: {status}",
+    "permissionMode": "Permission mode: {mode}"
+  },
+  "shutdown": "Bridge is shutting down ({signal}). Running tasks may be interrupted.",
+  "queue": "Previous request is still processing. Queued — will execute automatically when done.",
+  "done": "<@{userId}> Task completed. See results above.",
+  "error": "An error occurred: {message}",
+  "session": {
+    "created": "Session created (sid:{sessionId})",
+    "ended": "Session ended.{sessionInfo}",
+    "executeTrigger": "Please execute the task described above.",
+    "defaultResumePrompt": "Please continue the previous task.",
+    "resuming": "<@{userId}> resuming session `{sessionId}`"
+  },
+  "commands": {
+    "stopSuccess": "Claude task force-stopped.",
+    "stopNotFound": "No running task in this thread.",
+    "statusEmpty": "No tasks currently running.",
+    "statusHeader": "Running tasks ({count}) | Queued threads: {locks}",
+    "resumeFormat": "Invalid format. Usage: `/claude-resume <session-id> [prompt]`",
+    "modeShow": "Current permission mode: **{current}** ({scope})\nDefault: `{defaultMode}`\n\nAvailable modes:\n- `full-auto` — All tools pre-approved, no prompts\n- `auto` — Background classifier reviews actions\n- `acceptEdits` — Auto-accept file edits\n- `plan` — Read-only analysis, no edits\n- `dontAsk` — Only pre-approved tools allowed",
+    "modeChanged": "<@{userId}> switched this thread's permission mode to **{mode}**"
+  },
+  "progress": "Claude is still working... ({elapsedMin} minutes elapsed)\nUse `/claude-stop` to force-stop.",
+  "stream": {
+    "tagOnly": "<@{userId}> Task completed. See results above."
+  },
+  "files": {
+    "outputComment": "Output file: {filename}"
+  },
+  "dm": {
+    "notAllowed": "DM conversations are not enabled for this bot.",
+    "notInAllowlist": "You are not authorized to use this bot via DM."
+  }
+}

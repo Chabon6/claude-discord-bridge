@@ -1,0 +1,42 @@
+{
+  "startup": {
+    "success": "Discord Bridge 啟動成功",
+    "time": "時間：{timestamp}",
+    "bot": "Bot：<@{botUserId}>",
+    "channel": "頻道：<#{channelId}>",
+    "mentionGating": "Mention gating：{status}",
+    "dmPolicy": "DM 政策：{status}",
+    "permissionMode": "權限模式：{mode}"
+  },
+  "shutdown": "Bridge 正在關閉 ({signal})。進行中的任務可能中斷。",
+  "queue": "前一個請求仍在處理中，已排入佇列，完成後會自動執行。",
+  "done": "<@{userId}> 已完成，結果如上。",
+  "error": "處理時發生錯誤：{message}",
+  "session": {
+    "created": "Session 已建立 (sid:{sessionId})",
+    "ended": "Session 已結束。{sessionInfo}",
+    "executeTrigger": "請執行上述描述的任務。",
+    "defaultResumePrompt": "請繼續先前的任務。",
+    "resuming": "<@{userId}> 透過 `/claude-resume` 接續 session `{sessionId}`"
+  },
+  "commands": {
+    "stopSuccess": "Claude 任務已強制中斷。",
+    "stopNotFound": "此 thread 目前沒有正在執行的任務。",
+    "statusEmpty": "目前沒有正在執行的任務。",
+    "statusHeader": "正在執行的任務（{count}）| 佇列鎖定 threads：{locks}",
+    "resumeFormat": "格式錯誤。用法：`/claude-resume <session-id> [指令]`",
+    "modeShow": "目前權限模式：**{current}** ({scope})\n預設模式：`{defaultMode}`\n\n可用模式：\n- `full-auto` — 所有工具預先核准，不會提示\n- `auto` — 背景分類器自動審查動作\n- `acceptEdits` — 自動接受編輯\n- `plan` — 唯讀分析，不修改檔案\n- `dontAsk` — 僅允許預先核准的工具",
+    "modeChanged": "<@{userId}> 已將此 thread 的權限模式切換為 **{mode}**"
+  },
+  "progress": "Claude 仍在執行中... (已經過 {elapsedMin} 分鐘)\n使用 `/claude-stop` 可強制中斷。",
+  "stream": {
+    "tagOnly": "<@{userId}> 已完成，結果如上。"
+  },
+  "files": {
+    "outputComment": "產出檔案：{filename}"
+  },
+  "dm": {
+    "notAllowed": "此 Bot 未開放 DM 對話功能。",
+    "notInAllowlist": "你未被授權透過 DM 使用此 Bot。"
+  }
+}
