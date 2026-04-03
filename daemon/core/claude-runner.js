@@ -205,6 +205,7 @@ function handleStreamingOutput(child, startTime, threadId, onStreamEvent, logCla
   const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
   const errChunks = [];
   let finalResult = null;
+  let permissionDenied = false;
 
   child.stderr.on('data', (data) => errChunks.push(data));
 
@@ -242,16 +243,26 @@ function handleStreamingOutput(child, startTime, threadId, onStreamEvent, logCla
         }
       }
     } else if (type === 'tool_result') {
+      const isError = event.is_error ?? false;
+
+      // Detect permission denial from tool error content
+      if (isError) {
+        const errorContent = String(event.content || event.error || '');
+        if (/permission|denied|not.?allowed|blocked|forbidden/i.test(errorContent)) {
+          permissionDenied = true;
+        }
+      }
+
       emitSafe(onStreamEvent, {
         type: 'tool_result',
         toolName: event.tool_name ?? null,
-        isError: event.is_error ?? false,
+        isError,
         sessionId: event.session_id,
         elapsedMs: Date.now() - startTime,
       });
       logClaude('tool_result', threadId, event.session_id, {
         toolName: event.tool_name ?? null,
-        isError: event.is_error ?? false,
+        isError,
       });
     } else if (type === 'result') {
       finalResult = {
@@ -275,11 +286,12 @@ function handleStreamingOutput(child, startTime, threadId, onStreamEvent, logCla
         numTurns: finalResult.numTurns,
         cost: finalResult.cost,
         exitCode: code,
+        permissionDenied,
       });
-      resolve(finalResult);
+      resolve({ ...finalResult, permissionDenied });
     } else if (code === 0) {
       logClaude('done', threadId, null, { durationMs, exitCode: 0, note: 'no result line' });
-      resolve({ text: '', sessionId: null });
+      resolve({ text: '', sessionId: null, permissionDenied });
     } else if (code === null) {
       logClaude('error', threadId, null, {
         durationMs,

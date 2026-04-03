@@ -532,7 +532,7 @@ export async function createBridge(options = {}) {
     }
 
     const streamCb = makeStreamCallback(replyChannel, logger);
-    const { text: result, sessionId } = await claude.runClaude(
+    const { text: result, sessionId, permissionDenied } = await claude.runClaude(
       i18n.t('session.executeTrigger') || 'Please execute the task described above.',
       {
         threadId,
@@ -545,7 +545,7 @@ export async function createBridge(options = {}) {
     );
 
     if (sessionId) threads.setSessionId(threadId, sessionId);
-    return { result, sessionId, streamCb };
+    return { result, sessionId, streamCb, permissionDenied };
   }
 
   /**
@@ -578,6 +578,40 @@ export async function createBridge(options = {}) {
         // Fallback: mention in channel if reply fails (e.g. original message deleted)
         await replyChannel.send(i18n.t('done', { userId: userId || '' }));
       }
+    }
+  }
+
+  /**
+   * Prompt the user for permission approval via Discord message.
+   * Waits 60 seconds for a yes/no reply.
+   *
+   * @param {object} channel - Discord channel to send the prompt
+   * @param {string} userId  - Discord user ID to listen for
+   * @returns {Promise<boolean>} true if user approved
+   */
+  async function promptPermissionRetry(channel, userId) {
+    await channel.send(i18n.t('permission.prompt', { userId }));
+
+    try {
+      const collected = await channel.awaitMessages({
+        filter: (m) =>
+          m.author.id === userId &&
+          /^(yes|no|y|n)$/i.test(m.content.trim()),
+        max: 1,
+        time: 60_000,
+        errors: ['time'],
+      });
+
+      const reply = collected.first()?.content?.trim()?.toLowerCase();
+      if (reply === 'yes' || reply === 'y') {
+        await channel.send(i18n.t('permission.approved'));
+        return true;
+      }
+      await channel.send(i18n.t('permission.rejected'));
+      return false;
+    } catch {
+      await channel.send(i18n.t('permission.timeout'));
+      return false;
     }
   }
 
@@ -697,12 +731,13 @@ export async function createBridge(options = {}) {
       const extraContext = fileContext + outputDirContext;
       const userMessage = (transformedPrompt || cleanText || '') + extraContext;
       let result;
+      let permissionDenied = false;
 
       if (hasSession) {
         // Existing session — resume directly
         streamCb = makeStreamCallback(replyChannel, logger);
         await reactions.addTyping(message);
-        ({ text: result } = await claude.runClaude(userMessage, {
+        ({ text: result, permissionDenied } = await claude.runClaude(userMessage, {
           threadId,
           resumeSessionId: currentThread.sessionId,
           onProgress: makeProgressCallback(replyChannel, i18n),
@@ -719,12 +754,12 @@ export async function createBridge(options = {}) {
             templates, currentThread?.type ?? 'ad-hoc',
             transformedPrompt || cleanText || '', message.author.id, history,
           ) + extraContext;
-          ({ result, streamCb } = await twoPhaseExecute(prompt, threadId, replyChannel));
+          ({ result, streamCb, permissionDenied } = await twoPhaseExecute(prompt, threadId, replyChannel));
         } else {
           const prompt = buildAdHocPrompt(
             templates, transformedPrompt || cleanText || '', message.author.id,
           ) + extraContext;
-          ({ result, streamCb } = await twoPhaseExecute(prompt, threadId, replyChannel));
+          ({ result, streamCb, permissionDenied } = await twoPhaseExecute(prompt, threadId, replyChannel));
         }
       }
 
@@ -737,6 +772,37 @@ export async function createBridge(options = {}) {
       await reactions.removeTyping(message);
       await postFinalResponse(streamCb, finalResult, replyChannel, message.author.id, message);
       await handleOutputFiles(outputDir, replyChannel);
+
+      // Permission denial detected — offer retry with full-auto
+      if (permissionDenied) {
+        logger.log('info', 'permission:denied', { threadId, userId: message.author.id });
+        const approved = await promptPermissionRetry(replyChannel, message.author.id);
+
+        if (approved) {
+          const retrySessionId = threads.get(threadId)?.sessionId;
+          const retryStreamCb = makeStreamCallback(replyChannel, logger);
+          const retryPrompt = i18n.t('permission.retryPrompt')
+            || 'Please retry the operations that were denied due to permissions.';
+
+          const { text: retryResult } = await claude.runClaude(retryPrompt, {
+            threadId,
+            resumeSessionId: retrySessionId,
+            onProgress: makeProgressCallback(replyChannel, i18n),
+            onStreamEvent: retryStreamCb,
+            timeoutMs: config.claude.execTimeoutMs,
+            permissionMode: 'full-auto',
+          });
+
+          const retryFinal = await hooks.emitTransform('onAfterClaude', retryResult, {
+            channelId: message.channel.id, threadId, userId: message.author.id,
+            sessionId: threads.get(threadId)?.sessionId,
+          });
+
+          await postFinalResponse(retryStreamCb, retryFinal, replyChannel, message.author.id, message);
+          await handleOutputFiles(outputDir, replyChannel);
+        }
+      }
+
       await reactions.addDone(message);
     } catch (err) {
       await reactions.removeTyping(message);

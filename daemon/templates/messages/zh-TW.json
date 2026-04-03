@@ -38,5 +38,12 @@
   "dm": {
     "notAllowed": "此 Bot 未開放 DM 對話功能。",
     "notInAllowlist": "你未被授權透過 DM 使用此 Bot。"
+  },
+  "permission": {
+    "prompt": "<@{userId}> Claude 在執行過程中有部分操作因權限不足被拒絕。是否要以完整權限重新執行被拒絕的操作？\n\n回覆 **yes** 核准（以 full-auto 模式重試）\n回覆 **no** 取消\n\n(60 秒內未回覆將自動取消)",
+    "approved": "已核准，正在以完整權限重新執行...",
+    "rejected": "已取消，不再重試。",
+    "timeout": "逾時未回覆，已自動取消。",
+    "retryPrompt": "使用者已核准完整權限。請重新執行先前因權限不足而被拒絕的操作。"
   }
 }
