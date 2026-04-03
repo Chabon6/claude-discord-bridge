@@ -407,6 +407,10 @@ function buildSlashCommands() {
             { name: 'plan (read-only, no edits)', value: 'plan' },
             { name: 'dontAsk (only pre-approved tools)', value: 'dontAsk' },
           )),
+
+    new SlashCommandBuilder()
+      .setName('claude-approve')
+      .setDescription('Retry denied operations with full-auto permissions (resumes last session)'),
   ];
 }
 
@@ -851,7 +855,7 @@ export async function createBridge(options = {}) {
 
   // -- executeResume (shared by slash command) ---
 
-  async function executeResume({ sessionId: targetSessionId, prompt, channel, userId }) {
+  async function executeResume({ sessionId: targetSessionId, prompt, channel, userId, permissionMode }) {
     const threadId = channel.id;
 
     if (!threads.has(threadId)) {
@@ -871,7 +875,7 @@ export async function createBridge(options = {}) {
         onProgress: makeProgressCallback(channel, i18n),
         onStreamEvent: streamCb,
         timeoutMs: config.claude.execTimeoutMs,
-        permissionMode: getPermissionMode(threadId),
+        permissionMode: permissionMode || getPermissionMode(threadId),
       });
 
       if (sessionId) threads.setSessionId(threadId, sessionId);
@@ -1007,6 +1011,43 @@ export async function createBridge(options = {}) {
       await interaction.reply(
         i18n.t('commands.modeChanged', { mode: newMode, userId: interaction.user.id })
       );
+    }
+
+    if (commandName === 'claude-approve') {
+      const threadId = interaction.channel?.isThread?.()
+        ? interaction.channel.id
+        : interaction.channel?.type === ChannelType.DM
+          ? `dm_${interaction.user.id}`
+          : interaction.channel?.id;
+
+      const currentThread = threads.get(threadId);
+      const sessionId = currentThread?.sessionId;
+
+      if (!sessionId) {
+        await interaction.reply({
+          content: i18n.t('commands.approveNoSession'),
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.reply(i18n.t('permission.approved'));
+      logger.log('info', 'permission:manualApprove', {
+        threadId,
+        user: interaction.user.id,
+        sessionId: sessionId.slice(0, 8),
+      });
+
+      const retryPrompt = i18n.t('permission.retryPrompt')
+        || 'Please retry the operations that were denied due to permissions.';
+
+      await executeResume({
+        sessionId,
+        prompt: retryPrompt,
+        channel: interaction.channel,
+        userId: interaction.user.id,
+        permissionMode: 'full-auto',
+      });
     }
   });
 

@@ -26,7 +26,8 @@
     "statusHeader": "Running tasks ({count}) | Queued threads: {locks}",
     "resumeFormat": "Invalid format. Usage: `/claude-resume <session-id> [prompt]`",
     "modeShow": "Current permission mode: **{current}** ({scope})\nDefault: `{defaultMode}`\n\nAvailable modes:\n- `full-auto` — All tools pre-approved, no prompts\n- `auto` — Background classifier reviews actions\n- `acceptEdits` — Auto-accept file edits\n- `plan` — Read-only analysis, no edits\n- `dontAsk` — Only pre-approved tools allowed",
-    "modeChanged": "<@{userId}> switched this thread's permission mode to **{mode}**"
+    "modeChanged": "<@{userId}> switched this thread's permission mode to **{mode}**",
+    "approveNoSession": "No session to retry in this thread. Send a message to Claude first."
   },
   "progress": "Claude is still working... ({elapsedMin} minutes elapsed)\nUse `/claude-stop` to force-stop.",
   "stream": {

@@ -26,7 +26,8 @@
     "statusHeader": "正在執行的任務（{count}）| 佇列鎖定 threads：{locks}",
     "resumeFormat": "格式錯誤。用法：`/claude-resume <session-id> [指令]`",
     "modeShow": "目前權限模式：**{current}** ({scope})\n預設模式：`{defaultMode}`\n\n可用模式：\n- `full-auto` — 所有工具預先核准，不會提示\n- `auto` — 背景分類器自動審查動作\n- `acceptEdits` — 自動接受編輯\n- `plan` — 唯讀分析，不修改檔案\n- `dontAsk` — 僅允許預先核准的工具",
-    "modeChanged": "<@{userId}> 已將此 thread 的權限模式切換為 **{mode}**"
+    "modeChanged": "<@{userId}> 已將此 thread 的權限模式切換為 **{mode}**",
+    "approveNoSession": "此 thread 沒有可重試的 session。請先發送一則訊息讓 Claude 執行任務。"
   },
   "progress": "Claude 仍在執行中... (已經過 {elapsedMin} 分鐘)\n使用 `/claude-stop` 可強制中斷。",
   "stream": {
