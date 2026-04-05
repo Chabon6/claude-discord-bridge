@@ -29,6 +29,7 @@ import {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
+  StringSelectMenuBuilder,
 } from 'discord.js';
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -46,6 +47,7 @@ import { createI18n } from './i18n.js';
 import { hooks, HookRegistry } from './hooks.js';
 import { toDiscordMarkdown, splitMessage } from './format.js';
 import { acquireThreadLock, isThreadLocked, activeLocksCount } from './thread-lock.js';
+import { createCommandDiscovery, VALID_COMMAND_NAME } from './command-discovery.js';
 
 export { toDiscordMarkdown, splitMessage } from './format.js';
 export { acquireThreadLock, isThreadLocked, activeLocksCount } from './thread-lock.js';
@@ -282,6 +284,48 @@ function buildThreadPrompt(templates, threadType, latestText, userId, history) {
 }
 
 // ---------------------------------------------------------------------------
+// Thread naming
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract a short topic title from the user's first message.
+ * Returns a concise, "subject-like" title (max ~50 chars).
+ */
+function generateTopicTitle(text) {
+  if (!text) return 'Claude';
+  // Strip mentions, URLs, and excessive whitespace
+  const cleaned = text
+    .replace(/<[@#][!&]?\d+>\s*/g, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return 'Claude';
+
+  // Take the first sentence or first 50 chars
+  const firstSentence = cleaned.split(/[.!?\n]/)[0]?.trim() || cleaned;
+  return firstSentence.length > 50
+    ? firstSentence.slice(0, 47) + '...'
+    : firstSentence;
+}
+
+/**
+ * Rename a thread to the standard format: `<sid_short> <topic_title>`.
+ * Silently ignores errors (e.g. missing permissions).
+ */
+async function renameThread(channel, sessionId, userText, logger) {
+  if (!channel?.isThread?.()) return;
+  try {
+    const sidShort = sessionId.slice(0, 8);
+    const topic = generateTopicTitle(userText);
+    const newName = `${sidShort} ${topic}`.slice(0, 100); // Discord max 100 chars
+    await channel.setName(newName);
+    logger.log('info', 'thread:renamed', { threadId: channel.id, name: newName });
+  } catch (err) {
+    logger.log('warn', 'thread:renameFailed', { threadId: channel.id, error: err.message });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
 
@@ -332,19 +376,37 @@ async function postClaudeResponse(channel, userId, response) {
 async function recoverThread(channel, botUserId, threads, logger) {
   const threadId = channel.id;
   try {
-    const messages = await channel.messages.fetch({ limit: 50 });
-    const arr = [...messages.values()];
-
-    const botParticipated = arr.some((m) => m.author?.id === botUserId);
-    if (!botParticipated) return false;
-
+    // Paginated scan: fetch up to 300 messages (3 pages) to find sid: marker
+    let botParticipated = false;
     let recoveredSessionId = null;
-    for (const m of arr) {
-      if (m.author?.id === botUserId && m.content?.includes('sid:')) {
-        const match = m.content.match(SESSION_MARKER_REGEX);
-        if (match) recoveredSessionId = match[1];
+    let lastMessageId = undefined;
+    const maxPages = 3;
+
+    for (let page = 0; page < maxPages; page++) {
+      const fetchOpts = { limit: 100 };
+      if (lastMessageId) fetchOpts.before = lastMessageId;
+
+      const messages = await channel.messages.fetch(fetchOpts);
+      if (messages.size === 0) break;
+
+      for (const m of messages.values()) {
+        if (m.author?.id === botUserId) {
+          botParticipated = true;
+          if (m.content?.includes('sid:')) {
+            const match = m.content.match(SESSION_MARKER_REGEX);
+            if (match) recoveredSessionId = match[1];
+          }
+        }
       }
+
+      // Stop paginating if we already found sid
+      if (recoveredSessionId) break;
+
+      lastMessageId = messages.last()?.id;
+      if (messages.size < 100) break; // No more messages
     }
+
+    if (!botParticipated) return false;
 
     threads.register(threadId, 'ad-hoc', { recovered: true });
     if (recoveredSessionId) {
@@ -411,6 +473,34 @@ function buildSlashCommands() {
     new SlashCommandBuilder()
       .setName('claude-approve')
       .setDescription('Retry denied operations with full-auto permissions (resumes last session)'),
+
+    new SlashCommandBuilder()
+      .setName('claude-compact')
+      .setDescription('Compact the current thread\'s Claude session context (runs /compact)'),
+
+    new SlashCommandBuilder()
+      .setName('claude-commands')
+      .setDescription('Browse and execute Claude Code commands')
+      .addStringOption(opt =>
+        opt.setName('category')
+          .setDescription('Filter by category')
+          .setRequired(false)
+          .addChoices(
+            { name: 'All', value: 'all' },
+            { name: 'General', value: 'General' },
+            { name: 'Language', value: 'Language' },
+            { name: 'Git', value: 'Git' },
+            { name: 'Planning', value: 'Planning' },
+            { name: 'Testing', value: 'Testing' },
+            { name: 'Docs', value: 'Docs' },
+            { name: 'Review', value: 'Review' },
+            { name: 'Automation', value: 'Automation' },
+            { name: 'Config', value: 'Config' },
+          ))
+      .addStringOption(opt =>
+        opt.setName('search')
+          .setDescription('Search commands by keyword')
+          .setRequired(false)),
   ];
 }
 
@@ -440,6 +530,7 @@ export async function createBridge(options = {}) {
   const claude = createClaudeRunner({ cliPath: config.claude.cliPath, cwd: config.claude.cwd, logger });
   const files = createFileHandler();
   const templates = loadPromptTemplates();
+  const commandDiscovery = createCommandDiscovery({ logger });
 
   // -- Discord client ---
   const client = new Client({
@@ -525,8 +616,12 @@ export async function createBridge(options = {}) {
 
   /**
    * Two-phase Claude execution: init session then resume for actual work.
+   * @param {string} prompt - The full prompt to send.
+   * @param {string} threadId - The thread ID.
+   * @param {object} replyChannel - The Discord channel/thread to reply in.
+   * @param {string} [userText] - Original user text for thread naming.
    */
-  async function twoPhaseExecute(prompt, threadId, replyChannel) {
+  async function twoPhaseExecute(prompt, threadId, replyChannel, userText) {
     const permissionMode = getPermissionMode(threadId);
     const { sessionId: initSessionId } = await claude.runClaude(
       buildInitPrompt(templates, prompt),
@@ -536,6 +631,7 @@ export async function createBridge(options = {}) {
     if (initSessionId) {
       threads.setSessionId(threadId, initSessionId);
       await postSessionMarker(replyChannel, initSessionId, i18n);
+      await renameThread(replyChannel, initSessionId, userText, logger);
       logger.log('info', 'session:init', { threadId, sessionId: initSessionId });
     }
 
@@ -787,12 +883,12 @@ export async function createBridge(options = {}) {
             templates, currentThread?.type ?? 'ad-hoc',
             transformedPrompt || cleanText || '', message.author.id, history,
           ) + extraContext;
-          ({ result, streamCb, permissionDenied } = await twoPhaseExecute(prompt, threadId, replyChannel));
+          ({ result, streamCb, permissionDenied } = await twoPhaseExecute(prompt, threadId, replyChannel, cleanText));
         } else {
           const prompt = buildAdHocPrompt(
             templates, transformedPrompt || cleanText || '', message.author.id,
           ) + extraContext;
-          ({ result, streamCb, permissionDenied } = await twoPhaseExecute(prompt, threadId, replyChannel));
+          ({ result, streamCb, permissionDenied } = await twoPhaseExecute(prompt, threadId, replyChannel, cleanText));
         }
       }
 
@@ -1020,6 +1116,11 @@ export async function createBridge(options = {}) {
           ? `dm_${interaction.user.id}`
           : interaction.channel?.id;
 
+      // Attempt session recovery if thread not in memory
+      if (!threads.has(threadId) && interaction.channel?.isThread?.()) {
+        await recoverThread(interaction.channel, client.user.id, threads, logger);
+      }
+
       const currentThread = threads.get(threadId);
       const sessionId = currentThread?.sessionId;
 
@@ -1048,6 +1149,213 @@ export async function createBridge(options = {}) {
         userId: interaction.user.id,
         permissionMode: 'full-auto',
       });
+    }
+
+    if (commandName === 'claude-compact') {
+      const threadId = interaction.channel?.isThread?.()
+        ? interaction.channel.id
+        : interaction.channel?.type === ChannelType.DM
+          ? `dm_${interaction.user.id}`
+          : interaction.channel?.id;
+
+      // Attempt session recovery if thread not in memory
+      if (!threads.has(threadId) && interaction.channel?.isThread?.()) {
+        await recoverThread(interaction.channel, client.user.id, threads, logger);
+      }
+
+      const currentThread = threads.get(threadId);
+      const sessionId = currentThread?.sessionId;
+
+      if (!sessionId) {
+        await interaction.reply({
+          content: i18n.t('commands.compactNoSession')
+            || 'No active session found for this thread. Send a message first to start a session.',
+          ephemeral: true,
+        });
+        return;
+      }
+
+      await interaction.reply(
+        i18n.t('commands.compactStarted', { userId: interaction.user.id, sessionId: sessionId.slice(0, 8) + '...' })
+          || `<@${interaction.user.id}> Compacting session \`${sessionId.slice(0, 8)}...\` context...`
+      );
+      logger.log('info', 'slash:compact', {
+        threadId,
+        user: interaction.user.id,
+        sessionId: sessionId.slice(0, 8),
+      });
+
+      await executeResume({
+        sessionId,
+        prompt: '/compact',
+        channel: interaction.channel,
+        userId: interaction.user.id,
+      });
+    }
+
+    if (commandName === 'claude-commands') {
+      const category = interaction.options.getString('category') || 'all';
+      const searchQuery = interaction.options.getString('search') || '';
+
+      let commands;
+      if (searchQuery) {
+        commands = commandDiscovery.search(searchQuery);
+      } else if (category === 'all') {
+        commands = commandDiscovery.getAll();
+      } else {
+        const categories = commandDiscovery.getCategories();
+        commands = categories.get(category) || [];
+      }
+
+      if (commands.length === 0) {
+        await interaction.reply({
+          content: searchQuery
+            ? `No commands found matching "${searchQuery}".`
+            : `No commands found in category "${category}".`,
+          ephemeral: true,
+        });
+        return;
+      }
+
+      // Discord select menu limit: 25 options. Paginate if needed.
+      const PAGE_SIZE = 25;
+      const totalPages = Math.ceil(commands.length / PAGE_SIZE);
+      const page = commands.slice(0, PAGE_SIZE);
+
+      const selectMenu = new StringSelectMenuBuilder()
+        .setCustomId('claude_command_select')
+        .setPlaceholder(`Select a command (${commands.length} available)`)
+        .addOptions(
+          page.map((cmd) => ({
+            label: `/${cmd.name}`.slice(0, 100),
+            description: (cmd.description || cmd.source || 'No description').slice(0, 100),
+            value: cmd.name.slice(0, 100),
+          })),
+        );
+
+      const row = new ActionRowBuilder().addComponents(selectMenu);
+      const header = searchQuery
+        ? `**Commands matching "${searchQuery}"** (${commands.length})`
+        : category === 'all'
+          ? `**All Commands** (${commands.length})`
+          : `**${category} Commands** (${commands.length})`;
+
+      const footer = totalPages > 1
+        ? `\nShowing 1-${PAGE_SIZE} of ${commands.length}. Use \`/claude-commands search:<keyword>\` to narrow results.`
+        : '';
+
+      await interaction.reply({
+        content: `${header}${footer}`,
+        components: [row],
+        ephemeral: true,
+      });
+
+      logger.log('info', 'slash:commands', {
+        user: interaction.user.id,
+        category,
+        search: searchQuery || '(none)',
+        results: commands.length,
+      });
+    }
+  });
+
+  // -- Select menu interaction handler (claude-commands) ---
+
+  client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isStringSelectMenu()) return;
+    if (interaction.customId !== 'claude_command_select') return;
+
+    try {
+      const selectedCommand = interaction.values[0];
+      if (!selectedCommand) return;
+
+      // Validate command name against strict allowlist
+      if (!VALID_COMMAND_NAME.test(selectedCommand)) {
+        await interaction.update({ content: 'Invalid command name.', components: [] });
+        return;
+      }
+      const knownNames = commandDiscovery.getAll().map((c) => c.name);
+      if (!knownNames.includes(selectedCommand)) {
+        await interaction.update({ content: 'Command no longer available. Try `/claude-commands` again.', components: [] });
+        return;
+      }
+
+      if (!interaction.channel) {
+        await interaction.update({ content: 'Cannot execute in this context.', components: [] });
+        return;
+      }
+
+      const threadId = interaction.channel.isThread?.()
+        ? interaction.channel.id
+        : interaction.channel.type === ChannelType.DM
+          ? `dm_${interaction.user.id}`
+          : interaction.channel.id;
+
+      // Attempt session recovery
+      if (!threads.has(threadId) && interaction.channel.isThread?.()) {
+        await recoverThread(interaction.channel, client.user.id, threads, logger);
+      }
+
+      const currentThread = threads.get(threadId);
+      const sessionId = currentThread?.sessionId;
+
+      if (!sessionId) {
+        await interaction.update({
+          content: i18n.t('commands.commandsNewSession', { command: selectedCommand })
+            || `Executing \`/${selectedCommand}\` in a new session...`,
+          components: [],
+        });
+
+        // Start a new two-phase session with the command as prompt
+        const newThreadId = threadId;
+        threads.register(newThreadId, 'ad-hoc', { initiator: interaction.user.id });
+        const prompt = buildAdHocPrompt(
+          templates, `/${selectedCommand}`, interaction.user.id,
+        );
+        const release = await acquireThreadLock(newThreadId);
+        try {
+          const { result, streamCb } = await twoPhaseExecute(
+            prompt, newThreadId, interaction.channel, `/${selectedCommand}`,
+          );
+          const finalResult = await hooks.emitTransform('onAfterClaude', result, {
+            channelId: interaction.channel.id, threadId: newThreadId, userId: interaction.user.id,
+            sessionId: threads.get(newThreadId)?.sessionId,
+          });
+          await postFinalResponse(streamCb, finalResult, interaction.channel, interaction.user.id, null);
+        } finally {
+          release();
+        }
+        return;
+      }
+
+      await interaction.update({
+        content: i18n.t('commands.commandsExecute', { command: selectedCommand, sessionId: sessionId.slice(0, 8) + '...' })
+          || `Executing \`/${selectedCommand}\` on session \`${sessionId.slice(0, 8)}...\``,
+        components: [],
+      });
+
+      logger.log('info', 'commands:execute', {
+        user: interaction.user.id,
+        command: selectedCommand,
+        threadId,
+        sessionId: sessionId.slice(0, 8),
+      });
+
+      await executeResume({
+        sessionId,
+        prompt: `/${selectedCommand}`,
+        channel: interaction.channel,
+        userId: interaction.user.id,
+      });
+    } catch (err) {
+      logger.log('error', 'commands:selectError', { error: err.message, stack: err.stack });
+      try {
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content: i18n.t('error', { message: 'Internal error.' }), ephemeral: true });
+        } else {
+          await interaction.update({ content: i18n.t('error', { message: 'Internal error.' }), components: [] });
+        }
+      } catch { /* best effort */ }
     }
   });
 
@@ -1105,6 +1413,29 @@ export async function createBridge(options = {}) {
     }
   }
 
+  // Send startup notification to dedicated notify channel (if configured)
+  if (config.discord.notifyChannelId && config.discord.notifyChannelId !== config.discord.channelId) {
+    try {
+      const notifyChannel = await client.channels.fetch(config.discord.notifyChannelId);
+      if (notifyChannel) {
+        const timestamp = new Date().toISOString();
+        const addonNames = hooks.listAddons().map((a) => a.name).join(', ') || 'none';
+        await notifyChannel.send([
+          `**${i18n.t('startup.success')}**`,
+          i18n.t('startup.time', { timestamp }),
+          i18n.t('startup.bot', { botUserId: client.user.id }),
+          i18n.t('startup.channel', { channelId: config.discord.channelId || 'all' }),
+          i18n.t('startup.mentionGating', { status: config.requireMention ? 'ON' : 'OFF' }),
+          i18n.t('startup.dmPolicy', { status: config.dm.enabled ? 'enabled' : 'disabled' }),
+          i18n.t('startup.permissionMode', { mode: config.claude.defaultPermissionMode }),
+          `Addons: ${addonNames}`,
+        ].join('\n'));
+      }
+    } catch (err) {
+      logger.log('error', 'startup:notifyChannel', { error: err.message });
+    }
+  }
+
   // =========================================================================
   // Graceful shutdown
   // =========================================================================
@@ -1112,12 +1443,22 @@ export async function createBridge(options = {}) {
   async function stop(signal) {
     clearInterval(hourlyCleanup);
     clearInterval(tempFileCleanup);
+    commandDiscovery.destroy();
 
     if (config.discord.channelId) {
       try {
         const channel = await client.channels.fetch(config.discord.channelId);
         if (channel) {
           await channel.send(i18n.t('shutdown', { signal: signal || 'manual' }));
+        }
+      } catch { /* best effort */ }
+    }
+
+    if (config.discord.notifyChannelId && config.discord.notifyChannelId !== config.discord.channelId) {
+      try {
+        const notifyChannel = await client.channels.fetch(config.discord.notifyChannelId);
+        if (notifyChannel) {
+          await notifyChannel.send(i18n.t('shutdown', { signal: signal || 'manual' }));
         }
       } catch { /* best effort */ }
     }

@@ -10,7 +10,7 @@
   },
   "shutdown": "Bridge 正在關閉 ({signal})。進行中的任務可能中斷。",
   "queue": "前一個請求仍在處理中，已排入佇列，完成後會自動執行。",
-  "done": "<@{userId}> 已完成，結果如上。",
+  "done": "<@{userId}>",
   "error": "處理時發生錯誤：{message}",
   "session": {
     "created": "Session 已建立 (sid:{sessionId})",
@@ -27,11 +27,16 @@
     "resumeFormat": "格式錯誤。用法：`/claude-resume <session-id> [指令]`",
     "modeShow": "目前權限模式：**{current}** ({scope})\n預設模式：`{defaultMode}`\n\n可用模式：\n- `full-auto` — 所有工具預先核准，不會提示\n- `auto` — 背景分類器自動審查動作\n- `acceptEdits` — 自動接受編輯\n- `plan` — 唯讀分析，不修改檔案\n- `dontAsk` — 僅允許預先核准的工具",
     "modeChanged": "<@{userId}> 已將此 thread 的權限模式切換為 **{mode}**",
-    "approveNoSession": "此 thread 沒有可重試的 session。請先發送一則訊息讓 Claude 執行任務。"
+    "approveNoSession": "此 thread 沒有可重試的 session。請先發送一則訊息讓 Claude 執行任務。",
+    "compactNoSession": "此 thread 沒有對應的 session。請先發送訊息以啟動 session。",
+    "compactStarted": "<@{userId}> 正在壓縮 session `{sessionId}` 的上下文...",
+    "commandsEmpty": "找不到符合的指令。",
+    "commandsExecute": "正在執行 `/{command}` (session `{sessionId}`)...",
+    "commandsNewSession": "正在以 `/{command}` 開啟新 session..."
   },
   "progress": "Claude 仍在執行中... (已經過 {elapsedMin} 分鐘)\n使用 `/claude-stop` 可強制中斷。",
   "stream": {
-    "tagOnly": "<@{userId}> 已完成，結果如上。"
+    "tagOnly": "<@{userId}>"
   },
   "files": {
     "outputComment": "產出檔案：{filename}"

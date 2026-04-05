@@ -64,6 +64,37 @@ const commands = [
           { name: 'plan (read-only, no edits)', value: 'plan' },
           { name: 'dontAsk (only pre-approved tools)', value: 'dontAsk' },
         )),
+  new SlashCommandBuilder()
+    .setName('claude-approve')
+    .setDescription('Retry denied operations with full-auto permissions (resumes last session)'),
+
+  new SlashCommandBuilder()
+    .setName('claude-compact')
+    .setDescription('Compact the current thread\'s Claude session context (runs /compact)'),
+
+  new SlashCommandBuilder()
+    .setName('claude-commands')
+    .setDescription('Browse and execute Claude Code commands')
+    .addStringOption(opt =>
+      opt.setName('category')
+        .setDescription('Filter by category')
+        .setRequired(false)
+        .addChoices(
+          { name: 'All', value: 'all' },
+          { name: 'General', value: 'General' },
+          { name: 'Language', value: 'Language' },
+          { name: 'Git', value: 'Git' },
+          { name: 'Planning', value: 'Planning' },
+          { name: 'Testing', value: 'Testing' },
+          { name: 'Docs', value: 'Docs' },
+          { name: 'Review', value: 'Review' },
+          { name: 'Automation', value: 'Automation' },
+          { name: 'Config', value: 'Config' },
+        ))
+    .addStringOption(opt =>
+      opt.setName('search')
+        .setDescription('Search commands by keyword')
+        .setRequired(false)),
 ].map(cmd => cmd.toJSON());
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
