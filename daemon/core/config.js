@@ -16,6 +16,7 @@ export function buildConfig(env = process.env) {
       applicationId: env.DISCORD_APPLICATION_ID,
       guildId: env.DISCORD_GUILD_ID || null,
       channelId: env.DISCORD_CHANNEL_ID || null,
+      notifyChannelId: env.NOTIFY_CHANNEL_ID || null,
     }),
     dm: Object.freeze({
       enabled: env.DM_ENABLED !== 'false',
@@ -30,6 +31,9 @@ export function buildConfig(env = process.env) {
     }),
     locale: env.LOCALE || 'en',
     requireMention: env.REQUIRE_MENTION !== 'false',
+    mentionExemptChannels: new Set(
+      (env.MENTION_EXEMPT_CHANNELS || '').split(',').map(s => s.trim()).filter(Boolean)
+    ),
     emojis: Object.freeze({
       ack: env.ACK_EMOJI || '\uD83D\uDC40',           // eyes
       typing: env.TYPING_EMOJI || '\u231B',             // hourglass

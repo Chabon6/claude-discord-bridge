@@ -782,7 +782,9 @@ export async function createBridge(options = {}) {
     if (!isDM && isInThread && config.discord.channelId && message.channel.parentId !== config.discord.channelId) return;
 
     // Mention gating (only for guild channel messages, not threads or DMs)
-    if (!isDM && !isInThread && config.requireMention && !isBotMentioned(message, client.user.id)) return;
+    // Skip gating for channels in mentionExemptChannels (e.g. wiki-ingest addon)
+    const isExempt = config.mentionExemptChannels.has(message.channel.id);
+    if (!isDM && !isInThread && config.requireMention && !isExempt && !isBotMentioned(message, client.user.id)) return;
 
     // Dedup
     if (dedup.isDuplicate(message.id)) return;
