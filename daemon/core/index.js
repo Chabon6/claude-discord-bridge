@@ -288,12 +288,11 @@ function buildThreadPrompt(templates, threadType, latestText, userId, history) {
 // ---------------------------------------------------------------------------
 
 /**
- * Extract a short topic title from the user's first message.
- * Returns a concise, "subject-like" title (max ~50 chars).
+ * Fallback: extract a short topic title via simple string truncation.
+ * Used when LLM summarization is unavailable or fails.
  */
-function generateTopicTitle(text) {
+function generateTopicTitleFallback(text) {
   if (!text) return 'Claude';
-  // Strip mentions, URLs, and excessive whitespace
   const cleaned = text
     .replace(/<[@#][!&]?\d+>\s*/g, '')
     .replace(/https?:\/\/\S+/g, '')
@@ -301,23 +300,66 @@ function generateTopicTitle(text) {
     .trim();
   if (!cleaned) return 'Claude';
 
-  // Take the first sentence or first 50 chars
   const firstSentence = cleaned.split(/[.!?\n]/)[0]?.trim() || cleaned;
   return firstSentence.length > 50
     ? firstSentence.slice(0, 47) + '...'
     : firstSentence;
 }
 
+const TOPIC_TITLE_PROMPT =
+  'Summarize the following user message into a short topic title (max 50 chars). ' +
+  'Output ONLY the title text, no quotes, no explanation.\n\n';
+
+/**
+ * Generate a concise topic title from the user's first message using LLM.
+ * Falls back to string truncation on failure.
+ *
+ * @param {string} text - The user's message.
+ * @param {{ runClaude: Function }} claudeRunner - Claude runner instance.
+ * @param {object} logger
+ * @returns {Promise<string>}
+ */
+async function generateTopicTitle(text, claudeRunner, logger) {
+  if (!text) return 'Claude';
+
+  const cleaned = text
+    .replace(/<[@#][!&]?\d+>\s*/g, '')
+    .replace(/https?:\/\/\S+/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!cleaned) return 'Claude';
+
+  try {
+    const { text: title } = await claudeRunner.runClaude(
+      TOPIC_TITLE_PROMPT + cleaned.slice(0, 500),
+      { timeoutMs: 30_000, permissionMode: 'plan' },
+    );
+    const trimmed = (title || '').replace(/^["']|["']$/g, '').trim();
+    if (trimmed && trimmed.length <= 50) return trimmed;
+    if (trimmed) return trimmed.slice(0, 47) + '...';
+  } catch (err) {
+    logger.log('warn', 'topic:llmFailed', { error: err.message });
+  }
+
+  return generateTopicTitleFallback(text);
+}
+
 /**
  * Rename a thread to the standard format: `<sid_short> <topic_title>`.
- * Silently ignores errors (e.g. missing permissions).
+ * Uses LLM summarization for meaningful titles, falls back to truncation.
+ *
+ * @param {object} channel - Discord thread channel.
+ * @param {string} sessionId
+ * @param {string} userText
+ * @param {{ runClaude: Function }} claudeRunner
+ * @param {object} logger
  */
-async function renameThread(channel, sessionId, userText, logger) {
+async function renameThread(channel, sessionId, userText, claudeRunner, logger) {
   if (!channel?.isThread?.()) return;
   try {
     const sidShort = sessionId.slice(0, 8);
-    const topic = generateTopicTitle(userText);
-    const newName = `${sidShort} ${topic}`.slice(0, 100); // Discord max 100 chars
+    const topic = await generateTopicTitle(userText, claudeRunner, logger);
+    const newName = `${sidShort} ${topic}`.slice(0, 100);
     await channel.setName(newName);
     logger.log('info', 'thread:renamed', { threadId: channel.id, name: newName });
   } catch (err) {
@@ -631,7 +673,7 @@ export async function createBridge(options = {}) {
     if (initSessionId) {
       threads.setSessionId(threadId, initSessionId);
       await postSessionMarker(replyChannel, initSessionId, i18n);
-      await renameThread(replyChannel, initSessionId, userText, logger);
+      await renameThread(replyChannel, initSessionId, userText, claude, logger);
       logger.log('info', 'session:init', { threadId, sessionId: initSessionId });
     }
 
