@@ -1056,10 +1056,31 @@ export async function createBridge(options = {}) {
         i18n.t('session.resuming', { userId: interaction.user.id, sessionId: sid.slice(0, 8) + '...' })
       );
 
+      // Auto-create a thread when resuming from a non-thread guild channel
+      let resumeChannel = interaction.channel;
+      const isThread = interaction.channel?.isThread?.() ?? false;
+      const isDM = interaction.channel?.type === ChannelType.DM;
+
+      if (!isThread && !isDM) {
+        try {
+          const replyMessage = await interaction.fetchReply();
+          resumeChannel = await replyMessage.startThread({
+            name: `Resume ${sid.slice(0, 8)}...`,
+            autoArchiveDuration: 1440,
+          });
+        } catch (err) {
+          logger.log('warn', 'thread:createFailed', {
+            channelId: interaction.channel.id,
+            error: err.message,
+          });
+          // Fallback: use the original channel
+        }
+      }
+
       await executeResume({
         sessionId: sid,
         prompt,
-        channel: interaction.channel,
+        channel: resumeChannel,
         userId: interaction.user.id,
       });
     }
@@ -1089,11 +1110,21 @@ export async function createBridge(options = {}) {
           await interaction.reply({ content: i18n.t('commands.stopNotFound'), ephemeral: true });
         }
       } else {
-        const longest = [...active].sort((a, b) => b.elapsedMin - a.elapsedMin)[0];
-        const sid = threads.get(longest.threadId)?.sessionId ?? '';
-        claude.killClaude(longest.threadId);
+        // Prioritize the session running in the current thread
+        const currentThreadId = interaction.channel?.isThread?.()
+          ? interaction.channel.id
+          : interaction.channel?.type === ChannelType.DM
+            ? `dm_${interaction.user.id}`
+            : interaction.channel?.id;
+
+        const currentThreadMatch = active.find((p) => p.threadId === currentThreadId);
+        const target = currentThreadMatch
+          || [...active].sort((a, b) => b.elapsedMin - a.elapsedMin)[0];
+
+        const sid = threads.get(target.threadId)?.sessionId ?? '';
+        claude.killClaude(target.threadId);
         await interaction.reply(
-          `${i18n.t('commands.stopSuccess')} (session \`${sid.slice(0, 8)}...\`, ${longest.elapsedMin} min)`
+          `${i18n.t('commands.stopSuccess')} (session \`${sid.slice(0, 8)}...\`, ${target.elapsedMin} min)`
         );
       }
       logger.log('info', 'slash:stop', { user: interaction.user.id, input: input || '(none)' });
