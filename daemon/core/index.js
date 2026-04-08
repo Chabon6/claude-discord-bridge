@@ -288,6 +288,24 @@ function buildThreadPrompt(templates, threadType, latestText, userId, history) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Extract a readable label from the first URL in the text.
+ * Returns domain + pathname slug, e.g. "arxiv.org/abs/2405.01234".
+ */
+function extractUrlLabel(text) {
+  const match = text.match(/https?:\/\/[^\s<>"')\]]+/);
+  if (!match) return null;
+  try {
+    const url = new URL(match[0]);
+    const host = url.hostname.replace(/^www\./, '');
+    const path = url.pathname.replace(/\/+$/, '');
+    const label = path && path !== '/' ? `${host}${path}` : host;
+    return label.length > 50 ? label.slice(0, 47) + '...' : label;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fallback: extract a short topic title via simple string truncation.
  * Used when LLM summarization is unavailable or fails.
  */
@@ -298,7 +316,7 @@ function generateTopicTitleFallback(text) {
     .replace(/https?:\/\/\S+/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-  if (!cleaned) return 'Claude';
+  if (!cleaned) return extractUrlLabel(text) || 'Claude';
 
   const firstSentence = cleaned.split(/[.!?\n]/)[0]?.trim() || cleaned;
   return firstSentence.length > 50
@@ -322,16 +340,14 @@ const TOPIC_TITLE_PROMPT =
 async function generateTopicTitle(text, claudeRunner, logger) {
   if (!text) return 'Claude';
 
-  const cleaned = text
-    .replace(/<[@#][!&]?\d+>\s*/g, '')
-    .replace(/https?:\/\/\S+/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!cleaned) return 'Claude';
+  const stripped = text.replace(/<[@#][!&]?\d+>\s*/g, '').replace(/\s+/g, ' ').trim();
+  if (!stripped) return 'Claude';
 
+  // Use the full text (including URLs) for LLM summarization so URL-only
+  // messages still get meaningful titles.
   try {
     const { text: title } = await claudeRunner.runClaude(
-      TOPIC_TITLE_PROMPT + cleaned.slice(0, 500),
+      TOPIC_TITLE_PROMPT + stripped.slice(0, 500),
       { timeoutMs: 30_000, permissionMode: 'plan' },
     );
     const trimmed = (title || '').replace(/^["']|["']$/g, '').trim();
