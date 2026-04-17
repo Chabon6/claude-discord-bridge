@@ -21,6 +21,8 @@
  *   WIKI_DIR                  — 知識庫路徑（預設 ~/knowledge-wiki）
  *   CLAUDE_CLI_PATH           — Claude CLI 路徑（預設 claude）
  *   CLAUDE_CWD                — Claude 工作目錄（預設 $HOME）
+ *   NOTION_KEY_STATEMENTDOG   — Notion API Key（Podcast 逐字稿存取用）
+ *   AUTO_INTEL_PODCAST_DB_ID  — Podcast 逐字稿 Notion Database ID
  */
 
 import { spawn } from 'node:child_process';
@@ -29,6 +31,7 @@ import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 import { checkQuota } from './quota-checker.js';
+import { checkNewPodcasts, markProcessed } from './podcast-checker.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -132,6 +135,11 @@ export function register(hooks, env) {
   const cliPath = env.CLAUDE_CLI_PATH || 'claude';
   const cwd = env.CLAUDE_CWD || homedir();
 
+  // Podcast 逐字稿偵測設定
+  const notionKeyStatementdog = env.NOTION_KEY_STATEMENTDOG || '';
+  const podcastDbId = env.AUTO_INTEL_PODCAST_DB_ID || '';
+  const podcastEnabled = notionKeyStatementdog.length > 0 && podcastDbId.length > 0;
+
   let client = null;
   let timer = null;
   let isRunning = false;
@@ -140,11 +148,36 @@ export function register(hooks, env) {
   // 追蹤已發送的 auto-intel 訊息，用於 emoji 回應處理
   const trackedMessages = new Map();
 
+  // ── 失敗追蹤與自動修復 ──
+  const FAILURE_THRESHOLD = 3;           // 連續失敗幾次觸發修復
+  const REPAIR_COOLDOWN_MS = 6 * 60 * 60 * 1000; // 同功能修復冷卻 6 小時
+
+  /** @type {Map<string, { count: number, errors: string[] }>} */
+  const failureTracker = new Map();
+  /** @type {Map<string, number>} 上次修復時間 */
+  const lastRepairAt = new Map();
+  /** @type {Set<string>} 正在修復中的功能（防止並行修復） */
+  const repairInProgress = new Set();
+
   // 載入 prompt 模板
   const promptTemplate = readFileSync(
     join(__dirname, 'prompts', 'research.md'),
     'utf-8',
   );
+
+  const podcastPromptTemplate = podcastEnabled
+    ? readFileSync(join(__dirname, 'prompts', 'podcast-ingest.md'), 'utf-8')
+    : '';
+
+  let repairPromptTemplate = null;
+  try {
+    repairPromptTemplate = readFileSync(
+      join(__dirname, 'prompts', 'self-repair.md'),
+      'utf-8',
+    );
+  } catch {
+    // self-repair.md 不存在時靜默停用修復功能
+  }
 
   // =========================================================================
   // Hooks
@@ -154,7 +187,7 @@ export function register(hooks, env) {
     client = _client;
 
     client.once('ready', () => {
-      log(`addon loaded — interval ${intervalMs / 60_000}min, channel ${channelId}`);
+      log(`addon loaded — interval ${intervalMs / 60_000}min, channel ${channelId}, podcast=${podcastEnabled ? 'ON' : 'OFF'}`);
 
       // 啟動排程
       timer = setInterval(() => runCycle(), intervalMs);
@@ -233,14 +266,14 @@ export function register(hooks, env) {
     isRunning = true;
 
     try {
-      // 1. 額度檢查（優先 rate limit 快取，回退 ccusage）
+      // 1. 額度檢查（僅影響 topic research，podcast 偵測不受限）
       const quota = await checkQuota({ max5hPct, max7dPct, maxDailyCost, max7dayCost });
+      const topicEnabled = quota.ok;
       if (!quota.ok) {
-        log(`quota exceeded [${quota.source}]: ${quota.reason}`);
-        return;
-      }
-      if (quota.source === 'rate-limit-cache') {
-        log(`quota OK [rate-limit] — 5h:${quota.fiveHourPct ?? '?'}% 7d:${quota.sevenDayPct ?? '?'}% (cache ${quota.cacheAgeMin}min old)`);
+        log(`quota exceeded [${quota.source}]: ${quota.reason} — skipping topic research`);
+      } else if (quota.source.startsWith('rate-limit-cache')) {
+        const staleTag = quota.source.includes('stale') ? '/stale' : '';
+        log(`quota OK [rate-limit${staleTag}] — 5h:${quota.fiveHourPct ?? 'skipped'}% 7d:${quota.sevenDayPct ?? '?'}% (cache ${quota.cacheAgeMin}min old)`);
       } else if (quota.source === 'ccusage') {
         log(`quota OK [ccusage] — daily $${quota.dailyCost?.toFixed(2) || '?'}, 7day $${quota.weekCost?.toFixed(2) || '?'}`);
       } else {
@@ -250,28 +283,60 @@ export function register(hooks, env) {
       // 2. 選擇主題（依台灣時間小時輪轉）
       const topicIndex = hour % TOPICS.length;
       const topic = TOPICS[topicIndex];
-      log(`researching topic: ${topic.label} (${topic.id})`);
+      if (topicEnabled) log(`researching topic: ${topic.label} (${topic.id})`);
 
-      // 3. 建構 prompt
-      const prompt = promptTemplate
-        .replaceAll('{{TOPIC_LABEL}}', topic.label)
-        .replaceAll('{{TOPIC_KEYWORDS}}', topic.keywords)
-        .replaceAll('{{TOPIC_ID}}', topic.id)
-        .replaceAll('{{TODAY}}', todayStr())
-        .replaceAll('{{WIKI_DIR}}', wikiDir);
+      // 3. 建構 prompt（僅 topicEnabled 時使用）
+      const prompt = topicEnabled
+        ? promptTemplate
+            .replaceAll('{{TOPIC_LABEL}}', topic.label)
+            .replaceAll('{{TOPIC_KEYWORDS}}', topic.keywords)
+            .replaceAll('{{TOPIC_ID}}', topic.id)
+            .replaceAll('{{TODAY}}', todayStr())
+            .replaceAll('{{WIKI_DIR}}', wikiDir)
+        : null;
 
-      // 4. 執行 claude -p
-      const result = await runClaudeCli(cliPath, cwd, prompt);
+      // 4. 平行執行：topic research（受 quota 限制）+ podcast 偵測（不受 quota 限制）
+      const tasks = [
+        topicEnabled ? runClaudeCli(cliPath, cwd, prompt) : Promise.resolve(null),
+      ];
 
-      if (!result || result.trim().length === 0) {
-        log('no result from claude, entering 2h cooldown');
-        skipUntil = Date.now() + 2 * 60 * 60 * 1000;
-        return;
+      if (podcastEnabled) {
+        tasks.push(runPodcastIngest());
       }
 
-      // 5. 發送到 Discord
-      await postToDiscord(result, topic);
-      log(`posted summary for topic: ${topic.label}`);
+      const [topicResult, podcastResult = null] = await Promise.all(tasks);
+
+      // 5. 發送 topic research 到 Discord + 失敗追蹤
+      if (topicResult !== null) {
+        recordSuccess('topic-research');
+        if (topicResult.trim().length > 0) {
+          await postToDiscord(topicResult, topic);
+          log(`posted summary for topic: ${topic.label}`);
+        }
+      } else if (topicEnabled) {
+        log('no result from topic research');
+        await recordFailure('topic-research', `claude returned null for topic: ${topic.id}`);
+      } else {
+        log('topic research skipped (quota exceeded)');
+      }
+
+      // 6. 發送 podcast 結果到 Discord
+      if (podcastResult && podcastResult.trim().length > 0) {
+        await postToDiscord(podcastResult, {
+          id: 'podcast-ingest',
+          label: 'Podcast 逐字稿攝入',
+        });
+        log('posted podcast ingest summary');
+      }
+
+      // 若兩邊都無結果，進入冷卻期
+      const hasAnyResult =
+        (topicResult && topicResult.trim().length > 0) ||
+        (podcastResult && podcastResult.trim().length > 0);
+      if (!hasAnyResult) {
+        log('no results from any source, entering 2h cooldown');
+        skipUntil = Date.now() + 2 * 60 * 60 * 1000;
+      }
     } catch (err) {
       log(`cycle error: ${err.message}`);
     } finally {
@@ -339,6 +404,61 @@ export function register(hooks, env) {
   }
 
   // =========================================================================
+  // Podcast 偵測與攝入
+  // =========================================================================
+
+  /**
+   * 檢查 Notion Podcast 資料庫是否有新集數，若有則觸發 Claude 攝入。
+   *
+   * @returns {Promise<string|null>} Claude 的攝入結果，或 null
+   */
+  async function runPodcastIngest() {
+    try {
+      const newPages = await checkNewPodcasts({
+        apiKey: notionKeyStatementdog,
+        databaseId: podcastDbId,
+      });
+
+      if (newPages.length === 0) {
+        log('podcast: no new episodes found');
+        recordSuccess('podcast-check');
+        return null;
+      }
+
+      log(`podcast: found ${newPages.length} new episode(s): ${newPages.map((p) => p.title).join(', ')}`);
+
+      // 組裝頁面清單供 prompt 使用
+      const pageListText = newPages
+        .map((p) => `- **${p.title}** (${p.show}, ${p.date})\n  Notion URL: ${p.url}\n  Page ID: ${p.id}`)
+        .join('\n\n');
+
+      const prompt = podcastPromptTemplate
+        .replaceAll('{{TODAY}}', todayStr())
+        .replaceAll('{{WIKI_DIR}}', wikiDir)
+        .replaceAll('{{PAGE_LIST}}', pageListText);
+
+      const result = await runClaudeCli(cliPath, cwd, prompt);
+
+      if (result !== null) {
+        // Claude 成功執行（含產出空內容），標記為已處理
+        await markProcessed(newPages.map((p) => p.id));
+        log(`podcast: marked ${newPages.length} episode(s) as processed`);
+        recordSuccess('podcast-ingest');
+      } else {
+        // Claude 執行失敗（spawn error / non-zero exit / timeout），下次重試
+        log(`podcast: claude failed, ${newPages.length} episode(s) will retry next cycle`);
+        await recordFailure('podcast-ingest', `claude returned null for ${newPages.length} episodes`);
+      }
+
+      return result;
+    } catch (err) {
+      log(`podcast: error — ${err.message}`);
+      await recordFailure('podcast-check', err.message);
+      return null;
+    }
+  }
+
+  // =========================================================================
   // Discord posting
   // =========================================================================
 
@@ -384,6 +504,169 @@ export function register(hooks, env) {
         interested: null,
       });
     }
+  }
+
+  // =========================================================================
+  // 失敗追蹤與自動修復
+  // =========================================================================
+
+  const FEATURE_LABELS = {
+    'topic-research': '主題情報研究',
+    'podcast-ingest': 'Podcast 逐字稿攝入',
+    'podcast-check': 'Podcast 資料庫偵測',
+  };
+
+  /**
+   * 記錄功能失敗，達到閾值時觸發自動修復。
+   *
+   * @param {string} feature  功能 ID
+   * @param {string} errorMsg 錯誤訊息
+   */
+  async function recordFailure(feature, errorMsg) {
+    const entry = failureTracker.get(feature) || { count: 0, errors: [] };
+    entry.count += 1;
+    entry.errors.push(`[${new Date().toISOString()}] ${errorMsg}`);
+    // 只保留最近 5 筆錯誤
+    if (entry.errors.length > 5) entry.errors.shift();
+    failureTracker.set(feature, entry);
+
+    log(`failure recorded: ${feature} (${entry.count}/${FAILURE_THRESHOLD})`);
+
+    if (entry.count >= FAILURE_THRESHOLD) {
+      await triggerRepair(feature);
+    }
+  }
+
+  /**
+   * 記錄功能成功，重置失敗計數器。
+   *
+   * @param {string} feature 功能 ID
+   */
+  function recordSuccess(feature) {
+    if (failureTracker.has(feature)) {
+      failureTracker.delete(feature);
+    }
+  }
+
+  /**
+   * 觸發 Claude Code 自動修復 session。
+   *
+   * @param {string} feature 故障功能 ID
+   */
+  async function triggerRepair(feature) {
+    if (!repairPromptTemplate) {
+      log(`repair: self-repair disabled (prompt template not found)`);
+      failureTracker.delete(feature);
+      return;
+    }
+
+    if (repairInProgress.size > 0) {
+      log(`repair: another repair already running (${[...repairInProgress].join(',')}), skipping ${feature}`);
+      failureTracker.delete(feature);
+      return;
+    }
+
+    const lastRepair = lastRepairAt.get(feature) || 0;
+    if (Date.now() - lastRepair < REPAIR_COOLDOWN_MS) {
+      log(`repair: ${feature} in cooldown, skipping (last repair ${Math.round((Date.now() - lastRepair) / 60_000)}min ago)`);
+      failureTracker.delete(feature);
+      return;
+    }
+
+    const entry = failureTracker.get(feature);
+    if (!entry) return;
+
+    log(`repair: triggering self-repair for ${feature} (${entry.count} consecutive failures)`);
+    repairInProgress.add(feature);
+    lastRepairAt.set(feature, Date.now());
+
+    const errorsText = entry.errors.length > 0
+      ? entry.errors.map((e) => `> ${e}`).join('\n')
+      : '> (no error details captured)';
+
+    const prompt = repairPromptTemplate
+      .replaceAll('{{FEATURE_ID}}', feature)
+      .replaceAll('{{FEATURE_LABEL}}', FEATURE_LABELS[feature] || feature)
+      .replaceAll('{{FAIL_COUNT}}', String(entry.count))
+      .replaceAll('{{RECENT_ERRORS}}', errorsText)
+      .replaceAll('{{ADDON_DIR}}', __dirname.replace(/\\/g, '/'))
+      .replaceAll('{{TODAY}}', todayStr());
+
+    try {
+      const result = await runRepairCli(cliPath, cwd, prompt);
+
+      if (result && result.trim().length > 0) {
+        await postToDiscord(result, {
+          id: 'self-repair',
+          label: `Self-Repair: ${FEATURE_LABELS[feature] || feature}`,
+        });
+        log(`repair: posted repair report for ${feature}`);
+      } else {
+        await postToDiscord(
+          `**Auto-Intel Self-Repair | ${todayStr()}**\n\n` +
+          `**${FEATURE_LABELS[feature] || feature}** 連續失敗 ${entry.count} 次，` +
+          `自動修復 session 未產出診斷結果。請人工檢查。\n\n` +
+          `最近錯誤：\n${errorsText}`,
+          { id: 'self-repair', label: 'Self-Repair' },
+        );
+        log(`repair: claude returned no result for ${feature}`);
+      }
+    } catch (err) {
+      log(`repair: error during repair of ${feature} — ${err.message}`);
+    } finally {
+      repairInProgress.delete(feature);
+      failureTracker.delete(feature);
+    }
+  }
+
+  /**
+   * 修復專用的 Claude CLI — 限制工具權限（禁止 Write/Edit，僅允許診斷）。
+   */
+  function runRepairCli(cli, workDir, prompt) {
+    return new Promise((resolve) => {
+      const child = spawn(cli, [
+        '-p', prompt,
+        '--output-format', 'json',
+        '--disallowedTools', 'Write,Edit,NotebookEdit',
+      ], {
+        cwd: workDir,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, BROWSER: 'none' },
+      });
+
+      const killTimer = setTimeout(() => {
+        log('repair: claude process exceeded timeout, killing');
+        try { child.kill('SIGTERM'); } catch { /* best effort */ }
+      }, CLAUDE_TIMEOUT_MS);
+
+      const chunks = [];
+      const errChunks = [];
+      child.stdout.on('data', (d) => chunks.push(d));
+      child.stderr.on('data', (d) => errChunks.push(d));
+
+      child.on('close', (code) => {
+        clearTimeout(killTimer);
+        const stdout = Buffer.concat(chunks).toString('utf-8').trim();
+        if (code !== 0) {
+          const stderr = Buffer.concat(errChunks).toString('utf-8').trim();
+          log(`repair: claude exit code ${code}: ${stderr.slice(0, 300)}`);
+          resolve(null);
+          return;
+        }
+        try {
+          const json = JSON.parse(stdout);
+          resolve(json.result || stdout);
+        } catch {
+          resolve(stdout);
+        }
+      });
+
+      child.on('error', (err) => {
+        clearTimeout(killTimer);
+        log(`repair: claude spawn error: ${err.message}`);
+        resolve(null);
+      });
+    });
   }
 
   // =========================================================================
