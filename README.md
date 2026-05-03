@@ -249,7 +249,7 @@ export function requiredEnv() {
 
 This bridge ships with two addons (`wiki-ingest`, `auto-intel`) that target a
 Karpathy-style LLM wiki. For a ready-to-fork wiki framework that pairs with
-these addons, see [knowledge-wiki-starter](https://github.com/<account>/knowledge-wiki-starter).
+these addons, see [knowledge-wiki-starter](https://github.com/Chabon6/knowledge-wiki-starter).
 
 ## Testing
 
