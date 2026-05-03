@@ -1,7 +1,7 @@
 /**
  * auto-intel addon — 自動情報蒐集與知識攝入
  *
- * 每小時自動執行：
+ * 每日固定整點執行（台灣時間 0/6/12/18 時）：
  *   1. 透過 ECC rate limit 快取（或 ccusage 回退）檢查 Claude Code 額度
  *   2. 額度充裕時，呼叫 claude -p 搜尋高品質資訊
  *   3. 將合格內容攝入 knowledge-wiki
@@ -12,7 +12,7 @@
  *   AUTO_INTEL_CHANNEL_ID — 發送摘要的 Discord 頻道 ID
  *
  * 可選環境變數：
- *   AUTO_INTEL_INTERVAL_MS   — 執行間隔（預設 3600000 = 1 小時）
+ *   AUTO_INTEL_INTERVAL_MS   — 已棄用（改為固定整點排程，此參數無效）
  *   AUTO_INTEL_MAX_5H_PCT    — 5 小時 rate limit 百分比上限（預設 80）
  *   AUTO_INTEL_MAX_7D_PCT    — 7 天 rate limit 百分比上限（預設 80）
  *   AUTO_INTEL_MAX_DAILY_COST — 回退用：當日花費閾值 USD（預設 20.00）
@@ -112,20 +112,12 @@ function todayStr() {
   return new Date().toISOString().split('T')[0];
 }
 
-/** 取得台灣時間的小時數。 */
-function taipeiHour() {
-  return new Date(
-    new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }),
-  ).getHours();
-}
-
 export function requiredEnv() {
   return ['AUTO_INTEL_CHANNEL_ID'];
 }
 
 export function register(hooks, env) {
   const channelId = env.AUTO_INTEL_CHANNEL_ID;
-  const intervalMs = parseInt(env.AUTO_INTEL_INTERVAL_MS || '3600000', 10);
   const max5hPct = parseInt(env.AUTO_INTEL_MAX_5H_PCT || '80', 10);
   const max7dPct = parseInt(env.AUTO_INTEL_MAX_7D_PCT || '80', 10);
   const maxDailyCost = parseFloat(env.AUTO_INTEL_MAX_DAILY_COST || '20.00');
@@ -144,6 +136,7 @@ export function register(hooks, env) {
   let timer = null;
   let isRunning = false;
   let skipUntil = 0; // 冷卻期：若無結果則延後執行
+  let cycleCount = 0; // 執行次數，用於主題輪轉
 
   // 追蹤已發送的 auto-intel 訊息，用於 emoji 回應處理
   const trackedMessages = new Map();
@@ -179,6 +172,27 @@ export function register(hooks, env) {
     // self-repair.md 不存在時靜默停用修復功能
   }
 
+  // 固定整點排程：台灣時間 0/6/12/18 時
+  const TARGET_HOURS_TW = [0, 6, 12, 18];
+
+  function msUntilNextSlot() {
+    const twMs = (Date.now() + 8 * 3_600_000) % 86_400_000;
+    const twHour = twMs / 3_600_000;
+    for (const h of TARGET_HOURS_TW) {
+      if (h > twHour) return { delay: (h - twHour) * 3_600_000, nextHour: h };
+    }
+    return { delay: (24 - twHour + TARGET_HOURS_TW[0]) * 3_600_000, nextHour: TARGET_HOURS_TW[0] };
+  }
+
+  function scheduleNext() {
+    const { delay, nextHour } = msUntilNextSlot();
+    timer = setTimeout(() => {
+      runCycle();
+      scheduleNext();
+    }, delay);
+    log(`下次執行：約 ${Math.round(delay / 60_000)} 分後（TW ${nextHour}:00）`);
+  }
+
   // =========================================================================
   // Hooks
   // =========================================================================
@@ -187,13 +201,13 @@ export function register(hooks, env) {
     client = _client;
 
     client.once('ready', () => {
-      log(`addon loaded — interval ${intervalMs / 60_000}min, channel ${channelId}, podcast=${podcastEnabled ? 'ON' : 'OFF'}`);
+      log(`addon loaded — 固定整點排程 TW 0/6/12/18, channel ${channelId}, podcast=${podcastEnabled ? 'ON' : 'OFF'}`);
 
-      // 啟動排程
-      timer = setInterval(() => runCycle(), intervalMs);
-
-      // 首次延遲執行（讓系統穩定）
-      setTimeout(() => runCycle(), startupDelay);
+      // 首次延遲執行後進入固定整點排程
+      timer = setTimeout(() => {
+        runCycle();
+        scheduleNext();
+      }, startupDelay);
     });
 
     // 監聽 emoji 回應
@@ -235,7 +249,7 @@ export function register(hooks, env) {
 
   hooks.on('shutdown', () => {
     if (timer) {
-      clearInterval(timer);
+      clearTimeout(timer);
       timer = null;
     }
   });
@@ -256,13 +270,6 @@ export function register(hooks, env) {
       return;
     }
 
-    // 避免深夜執行（台灣時間 00:00-07:00）
-    const hour = taipeiHour();
-    if (hour < 7) {
-      log(`night hours (${hour}:00 TW), skipping`);
-      return;
-    }
-
     isRunning = true;
 
     try {
@@ -280,8 +287,9 @@ export function register(hooks, env) {
         log(`quota OK [${quota.source}]: ${quota.reason}`);
       }
 
-      // 2. 選擇主題（依台灣時間小時輪轉）
-      const topicIndex = hour % TOPICS.length;
+      // 2. 選擇主題（依執行次數輪轉，確保 7 個主題均等覆蓋）
+      const topicIndex = cycleCount % TOPICS.length;
+      cycleCount++;
       const topic = TOPICS[topicIndex];
       if (topicEnabled) log(`researching topic: ${topic.label} (${topic.id})`);
 
@@ -334,8 +342,8 @@ export function register(hooks, env) {
         (topicResult && topicResult.trim().length > 0) ||
         (podcastResult && podcastResult.trim().length > 0);
       if (!hasAnyResult) {
-        log('no results from any source, entering 2h cooldown');
-        skipUntil = Date.now() + 2 * 60 * 60 * 1000;
+        log('no results from any source, entering 6h cooldown');
+        skipUntil = Date.now() + 6 * 60 * 60 * 1000;
       }
     } catch (err) {
       log(`cycle error: ${err.message}`);
