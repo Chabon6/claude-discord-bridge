@@ -853,6 +853,20 @@ export async function createBridge(options = {}) {
 
     const cleanText = stripMention(message.content || '', client.user.id);
 
+    // Fetch referenced message content when user replies to a message (e.g. auto-intel)
+    let replyContext = '';
+    if (message.reference?.messageId) {
+      try {
+        const refMsg = await message.fetchReference();
+        if (refMsg?.content) {
+          replyContext = `\n<referenced_message author="${refMsg.author?.username || 'unknown'}" message_id="${refMsg.id}">\n${refMsg.content}\n</referenced_message>\n`;
+        }
+      } catch {
+        // Referenced message may have been deleted — proceed without context
+        logger.log('warn', 'reference:fetchFailed', { messageId: message.reference.messageId });
+      }
+    }
+
     // Determine thread context
     let threadId;
     let replyChannel;
@@ -917,7 +931,7 @@ export async function createBridge(options = {}) {
 
       const currentThread = threads.get(threadId);
       const hasSession = Boolean(currentThread?.sessionId);
-      const extraContext = fileContext + outputDirContext;
+      const extraContext = replyContext + fileContext + outputDirContext;
       const userMessage = (transformedPrompt || cleanText || '') + extraContext;
       let result;
       let permissionDenied = false;
