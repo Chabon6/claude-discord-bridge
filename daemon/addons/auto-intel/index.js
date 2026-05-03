@@ -1,4 +1,4 @@
-/**
+﻿/**
  * auto-intel addon — 自動情報蒐集與知識攝入
  *
  * 每日固定整點執行（台灣時間 0/6/12/18 時）：
@@ -110,6 +110,22 @@ function splitText(text, maxLen = DISCORD_MAX_LEN) {
 /** 取得今天日期字串 YYYY-MM-DD。 */
 function todayStr() {
   return new Date().toISOString().split('T')[0];
+}
+
+/**
+ * 套用使用者 profile placeholder。
+ * 若 env 未設定，使用通用預設值，避免 prompt 含個資綁定。
+ */
+function applyUserPlaceholders(prompt, env) {
+  const userName = env.AUTO_INTEL_USER_NAME || 'the user';
+  const userProfile = env.AUTO_INTEL_USER_PROFILE
+    || 'A knowledge worker who values high-quality, actionable information.';
+  const userRelevance = env.AUTO_INTEL_USER_RELEVANCE
+    || 'practical insight or actionable advice';
+  return prompt
+    .replaceAll('{{USER_NAME}}', userName)
+    .replaceAll('{{USER_PROFILE}}', userProfile)
+    .replaceAll('{{USER_RELEVANCE}}', userRelevance);
 }
 
 export function requiredEnv() {
@@ -295,12 +311,15 @@ export function register(hooks, env) {
 
       // 3. 建構 prompt（僅 topicEnabled 時使用）
       const prompt = topicEnabled
-        ? promptTemplate
-            .replaceAll('{{TOPIC_LABEL}}', topic.label)
-            .replaceAll('{{TOPIC_KEYWORDS}}', topic.keywords)
-            .replaceAll('{{TOPIC_ID}}', topic.id)
-            .replaceAll('{{TODAY}}', todayStr())
-            .replaceAll('{{WIKI_DIR}}', wikiDir)
+        ? applyUserPlaceholders(
+            promptTemplate
+              .replaceAll('{{TOPIC_LABEL}}', topic.label)
+              .replaceAll('{{TOPIC_KEYWORDS}}', topic.keywords)
+              .replaceAll('{{TOPIC_ID}}', topic.id)
+              .replaceAll('{{TODAY}}', todayStr())
+              .replaceAll('{{WIKI_DIR}}', wikiDir),
+            env,
+          )
         : null;
 
       // 4. 平行執行：topic research（受 quota 限制）+ podcast 偵測（不受 quota 限制）
@@ -440,10 +459,13 @@ export function register(hooks, env) {
         .map((p) => `- **${p.title}** (${p.show}, ${p.date})\n  Notion URL: ${p.url}\n  Page ID: ${p.id}`)
         .join('\n\n');
 
-      const prompt = podcastPromptTemplate
-        .replaceAll('{{TODAY}}', todayStr())
-        .replaceAll('{{WIKI_DIR}}', wikiDir)
-        .replaceAll('{{PAGE_LIST}}', pageListText);
+      const prompt = applyUserPlaceholders(
+        podcastPromptTemplate
+          .replaceAll('{{TODAY}}', todayStr())
+          .replaceAll('{{WIKI_DIR}}', wikiDir)
+          .replaceAll('{{PAGE_LIST}}', pageListText),
+        env,
+      );
 
       const result = await runClaudeCli(cliPath, cwd, prompt);
 
