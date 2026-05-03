@@ -245,6 +245,12 @@ export function requiredEnv() {
 | `startup` | Event | Called when the bot starts |
 | `shutdown` | Event | Called when the bot stops |
 
+## Companion: knowledge-wiki-starter
+
+This bridge ships with two addons (`wiki-ingest`, `auto-intel`) that target a
+Karpathy-style LLM wiki. For a ready-to-fork wiki framework that pairs with
+these addons, see [knowledge-wiki-starter](https://github.com/<account>/knowledge-wiki-starter).
+
 ## Testing
 
 ```bash
