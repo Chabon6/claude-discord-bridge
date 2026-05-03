@@ -1,4 +1,4 @@
-/**
+﻿/**
  * wiki-ingest addon — Discord URL 自動攝入知識管理系統
  *
  * 使用 bridge 原生流程（emoji、thread、session），僅透過
@@ -103,7 +103,7 @@ export function register(hooks, env) {
       ``,
       `**關鍵洞見：** 列出 2-4 個具體的知識點或可操作的重點（用 bullet points）。`,
       ``,
-      `**為什麼重要：** 一句話說明這份知識對 Chabon 的具體價值。`,
+      `**為什麼重要：** 一句話說明這份知識對使用者的具體價值。`,
       ``,
       `#標籤1 #標籤2 #標籤3`,
       ``,
